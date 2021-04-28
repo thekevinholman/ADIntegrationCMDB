@@ -1,0 +1,339 @@
+﻿<?xml version="1.0" encoding="utf-8"?><ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.0" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest>
+    <Identity>
+      <ID>Demo.CMDB.ADIntegration</ID>
+      <Version>1.0.0.0</Version>
+    </Identity>
+    <Name>Demo.CMDB.ADIntegration</Name>
+    <References>
+      <Reference Alias="Windows">
+        <ID>Microsoft.Windows.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="System">
+        <ID>System.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="SC">
+        <ID>Microsoft.SystemCenter.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Health">
+        <ID>System.Health.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+    </References>
+  </Manifest>
+  <TypeDefinitions>
+    <ModuleTypes>
+      <DataSourceModuleType ID="Demo.CMDB.ADIntegration.PsCMDBQuery.DS" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <IncludeSchemaTypes>
+            <SchemaType>Windows!Microsoft.Windows.PowerShellSchema</SchemaType>
+          </IncludeSchemaTypes>
+          <xsd:element minOccurs="1" name="IntervalSeconds" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element minOccurs="0" name="SyncTime" type="xsd:string" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element minOccurs="0" maxOccurs="1" name="Parameters" type="NamedParametersType" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="SchedulerDS" TypeID="System!System.SimpleScheduler">
+                <IntervalSeconds>$Config/IntervalSeconds$</IntervalSeconds>
+                <SyncTime>$Config/SyncTime$</SyncTime>
+              </DataSource>
+              <ProbeAction ID="PSPA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagProbe">
+                <ScriptName>Demo.CMDB.ADIntegration.PsCMDBQuery.DS.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+# 
+# Get Server list from CMDB for SCOM ADIntegration
+# Output FQDN and DistinguishedName into PropertyBags
+#
+# Kevin Holman
+# v 1.2
+#
+#=================================================================================
+param($SQLQuery,$RuleId)
+
+
+# Manual Testing section - put stuff here for manually testing script - typically parameters:
+#=================================================================================
+# $$RuleId = "Demo.CMDB.ADIntegration.MGNAME.MSNAME.Rule"
+# $SQLQuery = "WITH OrderedServers AS 
+#(
+#	SELECT SERVERNAME, ROW_NUMBER() OVER(ORDER BY SERVERNAME) AS RowNumber
+#	FROM serverlist
+#    WHERE MG = 'PROD'
+#)
+#SELECT SERVERNAME
+#FROM OrderedServers
+#WHERE RowNumber BETWEEN 1 and 2"
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging
+$ScriptName = "Demo.CMDB.ADIntegration.PsCMDBQuery.DS.ps1"
+$EventID = 9500
+
+$SQLServer = "SQLSERVERNAME\INSTANCENAME"
+$SQLDBName =  "CMDB"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# PropertyBag Script section - Monitoring scripts get this
+#=================================================================================
+# Load SCOM PropertyBag function
+$bag = $momapi.CreatePropertyBag()
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+# Log an event for the parameters		  
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Rule: ($RuleId) `n SQL Server: ($SQLServer) `n SQLDBName: ($SQLDBName) `n SQLQuery: ($SQLQuery)")
+
+#Clear any previous errors
+$Error.Clear()
+
+# Query the CMDB database to get the servers and properties
+$SqlConnection = New-Object System.Data.SqlClient.SqlConnection
+$SqlConnection.ConnectionString = “Server=$SQLServer;Database=$SQLDBName;Integrated Security=True”
+$SqlCmd = New-Object System.Data.SqlClient.SqlCommand
+$SqlCmd.CommandText = $SQLQuery
+$SqlCmd.Connection = $SqlConnection
+$SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter
+$SqlAdapter.SelectCommand = $SqlCmd
+$ds = New-Object System.Data.DataSet
+$SqlAdapter.Fill($ds)
+$SqlConnection.Close()
+
+#Check for errors connecting to SQL
+IF($Error)
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,1,"`n FATAL ERROR connecting to SQL server. `n Rule: ($RuleId). `n SQLServer: ($SQLServer). `n SQLDBName: ($SQLDBName). `n SQLQuery: ($SqlQuery). `n Error is: ($error).")
+  EXIT
+}
+
+#Loop through each row of the SQL query output
+$i=0;
+$j=0;
+FOREACH ($row in $ds.Tables[0].Rows)
+{
+	#Increment our counter to get number of computers returned from query
+	$i = $i+1
+	#Get the FQDN from the SQL data
+	$FQDN = $row[0].ToString().Trim()
+    #Get the domain from the FQDN
+    $Domain = $FQDN.Substring($FQDN.IndexOf(".") + 1)
+    #Get the HostName and DomainComputer Account Name for DN use below
+    $FQDNSplit = $FQDN.Split(".")
+    #Get the HostName
+    $HostName = $FQDNSplit[0]
+    #Get the DomainComputerAccount
+    $DomainComputerAccountName = $FQDNSplit[1] + "\" + $HostName + "$" 
+
+    #Get the Distinguished Name
+    $ADS_NAME_INITTYPE_DOMAIN = 1
+    $ADS_NAME_TYPE_NT4 = 3
+    $ADS_NAME_TYPE_1779 = 1
+    $NameTranslate = New-Object -ComObject "NameTranslate"
+
+    #Clear any previous errors
+    $Error.Clear()
+
+    #Connect to Active directory
+    $NameTranslate.GetType().InvokeMember("Init", "InvokeMethod", $NULL, $NameTranslate, ($ADS_NAME_INITTYPE_DOMAIN, $Domain)) | Out-Null
+
+    #We need to check for an error at this point because this is where we connect to a domain and this might fail if we dont have rights or are firewalled
+    IF($Error)
+    {
+      $momapi.LogScriptEvent($ScriptName,$EventID,1, "`n FATAL ERROR connecting to Active Directory. `n Terminating script. `n Rule: ($RuleId) `n Domain: ($Domain) `n Error is: ($error).")
+      EXIT
+    }
+
+    #Connect to AD and look up computer object from CMDB
+	$NameTranslate.GetType().InvokeMember("Set", "InvokeMethod", $NULL, $NameTranslate, ($ADS_NAME_TYPE_NT4, $DomainComputerAccountName)) | Out-Null
+    $DN = $NameTranslate.GetType().InvokeMember("Get", "InvokeMethod", $NULL, $NameTranslate, $ADS_NAME_TYPE_1779)
+
+    #We need to check for an error at this point because this is where we find the computer in AD and it might not exist
+    IF($Error)
+    {
+      $momapi.LogScriptEvent($ScriptName,$EventID,2, "`n NON FATAL WARNING connecting to Active Directory to find computer from CMDB. `n This usually mean that a computer exists in the CMDB bues does not exist in AD or the CMDB record is bad. `n Rule: ($RuleId) `n Domain: ($Domain). `n ComputerName = ($DomainComputerAccountName). `n Error is: ($error).")
+    }	
+	ELSE
+	{
+      # Assume no errors so we will continue
+	  #Increment our counter to get number of computers returned from AD
+	  $j = $j+1
+	  
+	  # Debugging:
+	  #Write-Host "Servername: $FQDN"
+      #Write-Host "HostName: $HostName"
+      #Write-Host "Domain Name: $Domain"
+      #Write-Host "Domain Computer Name: $DomainComputerAccountName"
+      #Write-Host "DN: $DN"
+	  #$momapi.LogScriptEvent($ScriptName,$EventID,0, "`n Debug: `n Rule: ($RuleId) `n FQDN: ($FQDN) `n HostName: ($HostName). `n DomainName: ($Domain). `, Domain Computer Account Name: ($DomainComputerAccountName). `n DN: ($DN)")
+
+      #Create a propertybag for each computer
+      $bag = $momapi.CreatePropertyBag()
+
+	  #Put the hostname and DN in the bag.  
+	  #Includes a value for the folder name so that we can tell which folder the data is from.
+	  $bag.AddValue("distinguishedName",$DN)
+	  $bag.AddValue("dNSHostName",$FQDN)
+	
+	  #Return each property bag as we create and populate it.
+	  $bag
+	}
+}
+$QueryComputerCount = $i
+$ADComputerCount = $j
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Rule: ($RuleId). `n CMDB query looped through ($QueryComputerCount) computers. `n AD query found ($ADComputerCount) matching computers.")
+#=================================================================================
+# End MAIN script section
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+				</ScriptBody>
+                <Parameters>$Config/Parameters$</Parameters>
+                <TimeoutSeconds>600</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PSPA">
+                <Node ID="SchedulerDS" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+    </ModuleTypes>
+  </TypeDefinitions>
+  <Monitoring>
+    <Rules>
+      <Rule ID="Demo.CMDB.ADIntegration.DOMAIN.MS1.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.ADAssignmentResourcePool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Custom</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Demo.CMDB.ADIntegration.PsCMDBQuery.DS">
+            <IntervalSeconds>14400</IntervalSeconds>
+            <SyncTime>00:01</SyncTime>
+            <Parameters>
+              <Parameter>
+                <Name>SQLQuery</Name>  <!-- Use ANY query that returns only fully qualified domain names -->
+                <Value>
+WITH OrderedServers AS 
+(
+	SELECT SERVERNAME, ROW_NUMBER() OVER(ORDER BY SERVERNAME) AS RowNumber
+	FROM serverlist
+    WHERE MG = 'PROD'
+)
+SELECT SERVERNAME
+FROM OrderedServers
+WHERE RowNumber BETWEEN 1 and 3
+				</Value>
+              </Parameter>
+              <Parameter>
+                <Name>RuleId</Name>
+                <Value>Demo.CMDB.ADIntegration.DOMAIN.MS1.Rule</Value>  <!-- We use this to help identify the rule calling the script for troubleshooting -->
+              </Parameter>
+            </Parameters>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="WA" RunAs="SC!Microsoft.SystemCenter.ADWriterAccount" TypeID="SC!Microsoft.SystemCenter.ADWriter">
+            <ManagementServerName>d46bb8b5-48b2-c607-4890-33efd9416450</ManagementServerName>  <!-- This needs to be changed to the GUID of the Windows Computer object for your management server -->
+            <Domain>DOMAIN.net</Domain>  <!-- This needs to be changed to your domain name you want to publish to -->
+            <UserAndDomain />
+            <Password />
+            <SecureReferenceId />
+            <dNSXPath>DataItem/Property[@Name='dNSHostName']</dNSXPath>
+            <distinguishedNameXPath>DataItem/Property[@Name='distinguishedName']</distinguishedNameXPath>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="Demo.CMDB.ADIntegration.DOMAIN.MS2.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.ADAssignmentResourcePool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Custom</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Demo.CMDB.ADIntegration.PsCMDBQuery.DS">
+            <IntervalSeconds>14400</IntervalSeconds>
+            <SyncTime>00:16</SyncTime>
+            <Parameters>
+              <Parameter>
+                <Name>SQLQuery</Name>  <!-- Use ANY query that returns only fully qualified domain names -->
+                <Value>
+WITH OrderedServers AS 
+(
+	SELECT SERVERNAME, ROW_NUMBER() OVER(ORDER BY SERVERNAME) AS RowNumber
+	FROM serverlist
+    WHERE MG = 'PROD'
+)
+SELECT SERVERNAME
+FROM OrderedServers
+WHERE RowNumber BETWEEN 4 and 6							
+				</Value>
+              </Parameter>
+              <Parameter>
+                <Name>RuleId</Name>
+                <Value>Demo.CMDB.ADIntegration.DOMAIN.MS2.Rule</Value>  <!-- We use this to help identify the rule calling the script for troubleshooting -->
+              </Parameter>
+            </Parameters>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="WA" RunAs="SC!Microsoft.SystemCenter.ADWriterAccount" TypeID="SC!Microsoft.SystemCenter.ADWriter">
+            <ManagementServerName>a0b254fd-72d4-23c4-8159-0d40b15f05b2</ManagementServerName>  <!-- This needs to be changed to the GUID of the Windows Computer object for your management server -->
+            <Domain>DOMAIN.net</Domain>  <!-- This needs to be changed to your domain name you want to publish to -->
+            <UserAndDomain />
+            <Password />
+            <SecureReferenceId />
+            <dNSXPath>DataItem/Property[@Name='dNSHostName']</dNSXPath>
+            <distinguishedNameXPath>DataItem/Property[@Name='distinguishedName']</distinguishedNameXPath>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+    </Rules>
+  </Monitoring>
+  <LanguagePacks>
+    <LanguagePack ID="ENU" IsDefault="true">
+      <DisplayStrings>
+        <DisplayString ElementID="Demo.CMDB.ADIntegration">
+          <Name>CMDB AD Integration Assignment Pack</Name>
+        </DisplayString>
+        <DisplayString ElementID="Demo.CMDB.ADIntegration.DOMAIN.MS1.Rule">
+          <Name>CMDB AD Integration Rule - DOMAIN - MS1</Name>
+        </DisplayString>
+        <DisplayString ElementID="Demo.CMDB.ADIntegration.DOMAIN.MS2.Rule">
+          <Name>CMDB AD Integration Rule - DOMAIN - MS2</Name>
+        </DisplayString>
+      </DisplayStrings>
+    </LanguagePack>
+  </LanguagePacks>
+</ManagementPack>
